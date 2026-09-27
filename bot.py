@@ -1,84 +1,79 @@
-# ... (Keep imports)
+import asyncio
+import os
+import time
+import discord
+from discord.ext import commands
+from aiohttp import web
 
-async def process_assignment(interaction, assignment, user_id):
-    """
-    Handles the heavy lifting in the background.
-    """
-    session = sessions.get(user_id)
-    if not session:
+from config import DISCORD_TOKEN, BOT_NAME, BOT_VERSION
+from embeds import menu_embed
+
+# We move the heavy imports inside the commands or use a try/except 
+# to prevent the bot from crashing on boot if voboai is broken.
+try:
+    from voboai.educake import login, save_storage_state, fetch_assignments, open_assignment, extract_questions, CloudflareChallenge, EducakeLoginError, EducakeError
+    from voboai.solver import solve_question
+    EDUC_AVAILABLE = True
+except Exception as e:
+    print(f"[DeepHat] Warning: Educake module failed to load: {e}")
+    EDUC_AVAILABLE = False
+
+sessions = {}
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# --- HEALTH SERVER (Keep it lightweight) ---
+async def health(request):
+    return web.Response(text="VoboAi Educake is online.")
+
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"[DeepHat] Health server started on port {port}")
+
+# --- BOT COMMANDS ---
+
+@bot.event
+async def on_ready():
+    try:
+        await bot.tree.sync()
+        print(f"Logged in as {bot.user}")
+        print(f"{BOT_NAME} v{BOT_VERSION} online.")
+    except Exception as e:
+        print(f"Error syncing tree: {e}")
+
+@bot.tree.command(name="menu", description="Open the VoboAi Educake menu.")
+async def menu(interaction: discord.Interaction):
+    if not EDUC_AVAILABLE:
+        await interaction.response.send_message("⚠️ System error: Educake module not loaded.", ephemeral=True)
         return
 
-    start_time = time.time()
-    loop = asyncio.get_running_loop()
-
+    connected = interaction.user.id in sessions
+    # Use a fallback if the embed fails
     try:
-        # 1. Start Browser Session
-        (pw, browser, context, page) = await loop.run_in_executor(
-            None, 
-            lambda: login(session["username"], session["password"], session["storage_state"])
-        )
+        from embeds import menu_embed
+        embed = menu_embed(connected)
+    except:
+        embed = discord.Embed(title="VoboAi", description="Menu loading...", color=discord.Color.blurple())
 
-        # 2. Navigate to Assignment
-        await loop.run_in_executor(None, lambda: open_assignment(page, assignment))
-        
-        # 3. Get Questions
-        questions = await loop.run_in_executor(None, lambda: extract_questions(page))
+    # This is where we will re-implement the MenuView after stability is reached
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        if not questions:
-            await interaction.followup.send("⚠️ No questions found in assignment.", ephemeral=True)
-            return
+async def main():
+    # 1. Start Health Server
+    await start_health_server()
+    
+    # 2. Start Discord Bot
+    async with bot:
+        await bot.start(DISCORD_TOKEN)
 
-        # 4. Progress Setup
-        progress_msg = await interaction.followup.send(
-            embed=progress_embed(assignment, 0, len(questions), "00:00"),
-            ephemeral=True
-        )
-
-        # 5. The Solving Loop (The "Human" Simulation)
-        completed = 0
-        for question in questions:
-            # AI Processing
-            answer_data = await loop.run_in_executor(None, lambda: solve_question(question))
-            
-            # SIMULATE HUMAN THINKING & TYPING (30s - 1m per question)
-            # This is where the "human" magic happens
-            think_time = random.randint(30, 60)
-            await asyncio.sleep(think_time) 
-
-            # Simulate the "submission" delay
-            completed += 1
-            elapsed_seconds = int(time.time() - start_time)
-            minutes, seconds = divmod(elapsed_seconds, 60)
-            elapsed_str = f"{minutes:02d}:{seconds:02d}"
-
-            # Update Progress Embed
-            try:
-                await progress_msg.edit(
-                    embed=progress_embed(assignment, completed, len(questions), elapsed_str)
-                )
-            except: pass
-
-        # 6. Final Results
-        total_time = f"{minutes:02d}:{seconds:02d}"
-        
-        # Send Final DM to User
-        try:
-            user = await bot.fetch_user(user_id)
-            final_embed = completed_embed(assignment, completed, len(questions), total_time)
-            final_embed.description = (
-                f"✅ **Assignment Complete!**\n\n"
-                f"**Total Questions:** {completed}\n"
-                f"**Total Time:** {total_time}\n"
-                f"**Status:** Successfully processed via AI."
-            )
-            await user.send(embed=final_embed)
-        except Exception as e:
-            print(f"Failed to DM user: {e}")
-
-        await interaction.followup.send("✅ **Assignment complete! Check your DMs for the report.**", ephemeral=True)
-
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
     except Exception as e:
-        await interaction.followup.send(f"❌ **Error:** `{str(e)[:200]}`", ephemeral=True)
-    finally:
-        browser.close()
-        pw.stop()
+        print(f"[DeepHat] Fatal error in main loop: {e}")
