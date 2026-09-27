@@ -103,6 +103,7 @@ async def start_health_server():
 # ---------------------------------------------------------
 
 class EducakeLoginModal(ui.Modal):
+
     def __init__(self):
         super().__init__(
             title="Educake Login"
@@ -130,6 +131,7 @@ class EducakeLoginModal(ui.Modal):
         self,
         interaction: discord.Interaction,
     ):
+
         await interaction.response.defer(
             ephemeral=True
         )
@@ -139,7 +141,23 @@ class EducakeLoginModal(ui.Modal):
 
         loop = asyncio.get_running_loop()
 
+        # -------------------------------------------------
+        # LOGIN STATUS
+        # -------------------------------------------------
+
+        status_message = await interaction.followup.send(
+            "🔐 **Trying to log into your Educake account...**\n"
+            "Please wait while I securely connect to Educake.",
+            ephemeral=True,
+            wait=True,
+        )
+
         try:
+
+            # -------------------------------------------------
+            # LOGIN
+            # -------------------------------------------------
+
             (
                 pw,
                 browser,
@@ -153,6 +171,21 @@ class EducakeLoginModal(ui.Modal):
                 ),
             )
 
+            # -------------------------------------------------
+            # LOGIN SUCCESS
+            # -------------------------------------------------
+
+            await status_message.edit(
+                content=(
+                    "✅ **Educake login successful!**\n"
+                    "📚 **Loading your assigned homework...**"
+                )
+            )
+
+            # -------------------------------------------------
+            # SAVE SESSION
+            # -------------------------------------------------
+
             storage_state = await loop.run_in_executor(
                 None,
                 lambda: save_storage_state(
@@ -160,12 +193,20 @@ class EducakeLoginModal(ui.Modal):
                 ),
             )
 
+            # -------------------------------------------------
+            # LOAD HOMEWORK
+            # -------------------------------------------------
+
             assignments = await loop.run_in_executor(
                 None,
                 lambda: fetch_assignments(
                     page
                 ),
             )
+
+            # -------------------------------------------------
+            # SAVE SESSION DATA
+            # -------------------------------------------------
 
             sessions[
                 interaction.user.id
@@ -179,28 +220,72 @@ class EducakeLoginModal(ui.Modal):
             browser.close()
             pw.stop()
 
-            await interaction.followup.send(
-                "✅ Educake account connected successfully.",
-                ephemeral=True,
+            # -------------------------------------------------
+            # FINAL STATUS
+            # -------------------------------------------------
+
+            await status_message.edit(
+                content=(
+                    "✅ **Educake account connected successfully!**\n"
+                    f"📚 **{len(assignments)} homework assignment(s) loaded.**"
+                )
             )
+
+        # -----------------------------------------------------
+        # CLOUDFLARE
+        # -----------------------------------------------------
 
         except CloudflareChallenge:
-            await interaction.followup.send(
-                "⚠️ Educake presented a browser verification "
-                "challenge. VoboAi cannot bypass that challenge.",
-                ephemeral=True,
+
+            await status_message.edit(
+                content=(
+                    "⚠️ **Educake browser verification appeared.**\n"
+                    "VoboAi stopped the login instead of bypassing "
+                    "the verification challenge."
+                )
             )
+
+        # -----------------------------------------------------
+        # LOGIN ERROR
+        # -----------------------------------------------------
 
         except EducakeLoginError as e:
-            await interaction.followup.send(
-                f"❌ Educake login failed:\n`{str(e)[:500]}`",
-                ephemeral=True,
+
+            await status_message.edit(
+                content=(
+                    "❌ **Educake login failed.**\n"
+                    f"`{str(e)[:500]}`"
+                )
             )
 
+        # -----------------------------------------------------
+        # GENERAL ERROR
+        # -----------------------------------------------------
+
         except Exception as e:
-            await interaction.followup.send(
-                f"❌ Unexpected error:\n`{str(e)[:500]}`",
-                ephemeral=True,
+
+            error_text = str(e)
+
+            if (
+                "Executable doesn't exist"
+                in error_text
+                or
+                "playwright install"
+                in error_text.lower()
+            ):
+
+                error_text = (
+                    "The Playwright browser is not installed "
+                    "on the Render service.\n\n"
+                    "Check your existing Render build command "
+                    "and redeploy with a clean build cache."
+                )
+
+            await status_message.edit(
+                content=(
+                    "❌ **Unexpected error**\n"
+                    f"`{error_text[:500]}`"
+                )
             )
 
 
@@ -209,6 +294,7 @@ class EducakeLoginModal(ui.Modal):
 # ---------------------------------------------------------
 
 class MenuView(ui.View):
+
     def __init__(self):
         super().__init__(
             timeout=300
@@ -224,6 +310,7 @@ class MenuView(ui.View):
         interaction: discord.Interaction,
         button: ui.Button,
     ):
+
         await interaction.response.send_modal(
             EducakeLoginModal()
         )
@@ -238,6 +325,7 @@ class MenuView(ui.View):
         interaction: discord.Interaction,
         button: ui.Button,
     ):
+
         await show_homework(
             interaction
         )
@@ -252,6 +340,7 @@ class MenuView(ui.View):
         interaction: discord.Interaction,
         button: ui.Button,
     ):
+
         connected = (
             interaction.user.id
             in sessions
@@ -275,7 +364,9 @@ class MenuView(ui.View):
 # ---------------------------------------------------------
 
 class HomeworkSelect(ui.Select):
+
     def __init__(self, assignments):
+
         self.assignments = assignments
 
         options = []
@@ -283,14 +374,18 @@ class HomeworkSelect(ui.Select):
         for index, assignment in enumerate(
             assignments[:25]
         ):
+
             options.append(
                 discord.SelectOption(
                     label=assignment.title[:100],
+
                     description=(
                         f"{assignment.subject} • "
                         f"Due: {assignment.due}"
                     )[:100],
+
                     value=str(index),
+
                     emoji="📝",
                 )
             )
@@ -306,6 +401,7 @@ class HomeworkSelect(ui.Select):
         self,
         interaction: discord.Interaction,
     ):
+
         index = int(
             self.values[0]
         )
@@ -323,7 +419,9 @@ class HomeworkSelect(ui.Select):
 
 
 class HomeworkSelectView(ui.View):
+
     def __init__(self, assignments):
+
         super().__init__(
             timeout=300
         )
@@ -344,7 +442,9 @@ class HomeworkSelectView(ui.View):
 # ---------------------------------------------------------
 
 class StartAssignmentView(ui.View):
+
     def __init__(self, assignment):
+
         super().__init__(
             timeout=300
         )
@@ -361,6 +461,7 @@ class StartAssignmentView(ui.View):
         interaction: discord.Interaction,
         button: ui.Button,
     ):
+
         await interaction.response.defer()
 
         asyncio.create_task(
@@ -380,6 +481,7 @@ class StartAssignmentView(ui.View):
         interaction: discord.Interaction,
         button: ui.Button,
     ):
+
         await show_homework(
             interaction
         )
@@ -392,7 +494,9 @@ class StartAssignmentView(ui.View):
 class BackButton(
     ui.Button
 ):
+
     def __init__(self):
+
         super().__init__(
             label="Back",
             emoji="◀️",
@@ -403,6 +507,7 @@ class BackButton(
         self,
         interaction: discord.Interaction,
     ):
+
         await interaction.response.edit_message(
             embed=menu_embed(
                 interaction.user.id in sessions
@@ -418,15 +523,18 @@ class BackButton(
 async def show_homework(
     interaction: discord.Interaction,
 ):
+
     session = sessions.get(
         interaction.user.id
     )
 
     if not session:
+
         await interaction.response.send_message(
             "🔐 You need to connect your Educake account first.",
             ephemeral=True,
         )
+
         return
 
     await interaction.response.defer(
@@ -436,6 +544,7 @@ async def show_homework(
     loop = asyncio.get_running_loop()
 
     try:
+
         (
             pw,
             browser,
@@ -481,6 +590,7 @@ async def show_homework(
         )
 
     except CloudflareChallenge:
+
         await interaction.followup.send(
             "⚠️ Educake presented a browser verification "
             "challenge. The saved session cannot bypass it.",
@@ -488,6 +598,7 @@ async def show_homework(
         )
 
     except Exception as e:
+
         await interaction.followup.send(
             f"❌ Could not load Educake homework:\n"
             f"`{str(e)[:500]}`",
@@ -503,15 +614,18 @@ async def process_assignment(
     interaction,
     assignment,
 ):
+
     session = sessions.get(
         interaction.user.id
     )
 
     if not session:
+
         await interaction.followup.send(
             "❌ Your Educake session has expired.",
             ephemeral=True,
         )
+
         return
 
     start_time = time.time()
@@ -519,6 +633,7 @@ async def process_assignment(
     loop = asyncio.get_running_loop()
 
     try:
+
         (
             pw,
             browser,
@@ -549,6 +664,7 @@ async def process_assignment(
         )
 
         if not questions:
+
             browser.close()
             pw.stop()
 
@@ -557,6 +673,7 @@ async def process_assignment(
                 "but no readable questions were detected.",
                 ephemeral=True,
             )
+
             return
 
         progress_message = await interaction.followup.send(
@@ -594,6 +711,7 @@ async def process_assignment(
             )
 
             try:
+
                 await progress_message.edit(
                     embed=progress_embed(
                         assignment,
@@ -602,6 +720,7 @@ async def process_assignment(
                         elapsed,
                     )
                 )
+
             except Exception:
                 pass
 
@@ -629,6 +748,7 @@ async def process_assignment(
         pw.stop()
 
     except CloudflareChallenge:
+
         await interaction.followup.send(
             "⚠️ Educake/Cloudflare presented a verification "
             "challenge. VoboAi stopped instead of bypassing it.",
@@ -636,6 +756,7 @@ async def process_assignment(
         )
 
     except Exception as e:
+
         await interaction.followup.send(
             f"❌ Assignment processing failed:\n"
             f"`{str(e)[:500]}`",
@@ -654,6 +775,7 @@ async def process_assignment(
 async def menu(
     interaction: discord.Interaction,
 ):
+
     connected = (
         interaction.user.id
         in sessions
@@ -691,6 +813,7 @@ async def on_ready():
 # ---------------------------------------------------------
 
 async def main():
+
     await start_health_server()
 
     await bot.start(
@@ -699,6 +822,7 @@ async def main():
 
 
 if __name__ == "__main__":
+
     asyncio.run(
         main()
     )
