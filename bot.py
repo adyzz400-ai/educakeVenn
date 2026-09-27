@@ -1,32 +1,59 @@
 import asyncio
 import os
 import time
+import traceback  # CRITICAL for debugging
 import discord
 from discord import app_commands, ui
 from discord.ext import commands
 from aiohttp import web
 
-from config import DISCORD_TOKEN, BOT_NAME, BOT_VERSION
-from embeds import menu_embed, homework_embed, assignment_embed, progress_embed, completed_embed
+from config import (
+    DISCORD_TOKEN,
+    BOT_NAME,
+    BOT_VERSION,
+)
 
-# Lazy Import to prevent boot crash
+# Import embeds with error handling
+try:
+    from embeds import (
+        menu_embed,
+        homework_embed,
+        assignment_embed,
+        progress_embed,
+        completed_embed,
+    )
+except Exception as e:
+    print(f"[DeepHat] Embeds failed to load: {e}")
+
+# LAZY IMPORT: This prevents the bot from crashing on boot if voboai is broken
 try:
     from voboai.educake import (
-        login, save_storage_state, fetch_assignments, open_assignment, 
-        extract_questions, CloudflareChallenge, EducakeLoginError
+        login,
+        save_storage_state,
+        fetch_assignments,
+        open_assignment,
+        extract_questions,
+        CloudflareChallenge,
+        EducakeLoginError,
+        EducakeError,
     )
     from voboai.solver import solve_question
     EDUC_AVAILABLE = True
+    print("[DeepHat] Educake module loaded successfully.")
 except Exception as e:
-    print(f"[DeepHat] Module Error: {e}")
+    print(f"[DeepHat] CRITICAL: Educake module failed to load!")
+    print(f"[DeepHat] Traceback: {traceback.format_exc()}")
     EDUC_AVAILABLE = False
 
 sessions = {}
+
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # --- HEALTH SERVER ---
-async def health(request): return web.Response(text="VoboAi Online")
+async def health(request):
+    return web.Response(text="VoboAi Educake is online.")
+
 async def start_health_server():
     app = web.Application()
     app.router.add_get("/", health)
@@ -35,71 +62,142 @@ async def start_health_server():
     port = int(os.getenv("PORT", "10000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    print(f"[DeepHat] Health server active on port {port}")
 
-# --- UI COMPONENTS ---
+# --- UI COMPONENTS (MODALS & VIEWS) ---
 
 class EducakeLoginModal(ui.Modal):
     def __init__(self):
         super().__init__(title="Educake Login")
-        self.username = ui.TextInput(label="Username", required=True)
-        self.password = ui.TextInput(label="Password", style=discord.TextStyle.short, required=True)
+        self.username = ui.TextInput(
+            label="Educake Username",
+            placeholder="Enter your Educake username",
+            required=True,
+            max_length=100,
+        )
+        self.password = ui.TextInput(
+            label="Educake Password",
+            placeholder="Enter your password",
+            required=True,
+            style=discord.TextStyle.short,
+            max_length=200,
+        )
         self.add_item(self.username)
         self.add_item(self.password)
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not EDUC_AVAILABLE:
+            return await interaction.response.send_message("❌ System error: Educake module not loaded.", ephemeral=True)
+
         await interaction.response.defer(ephemeral=True)
-        status_msg = await interaction.followup.send("🔐 **Connecting to Educake...**", ephemeral=True)
-        
+        username = self.username.value
+        password = self.password.value
+        user_id = interaction.user.id
+
+        status_message = await interaction.followup.send(
+            "🔐 **Trying to log into your Educake account...**\n"
+            "Please wait while I securely connect.",
+            ephemeral=True,
+        )
+
         loop = asyncio.get_running_loop()
+
         try:
-            # Logic execution
-            pw, browser, context, page = await loop.run_in_executor(None, lambda: login(self.username.value, self.password.value))
-            
-            # Store session
+            # Run blocking Playwright code in executor
+            (pw, browser, context, page) = await loop.run_in_executor(
+                None, lambda: login(username, password)
+            )
+
+            await status_message.edit(content="✅ **Educake login successful!**\n📚 **Loading assignments...**")
+
+            # Save session state
             storage_state = await loop.run_in_executor(None, lambda: save_storage_state(context))
             assignments = await loop.run_in_executor(None, lambda: fetch_assignments(page))
 
-            sessions[interaction.user.id] = {
-                "username": self.username.value,
-                "password": self.password.value,
+            sessions[user_id] = {
+                "username": username,
+                "password": password,
                 "storage_state": storage_state,
-                "assignments": assignments
+                "assignments": assignments,
             }
 
-            await status_msg.edit(content="✅ **Connected!** Loading assignments...")
-            # Trigger the menu update here
+            browser.close()
+            pw.stop()
+
+            await status_message.edit(
+                content=f"✅ **Account connected!**\n📚 **{len(assignments)} assignment(s) found.**"
+            )
+
+        except CloudflareChallenge:
+            await status_message.edit(content="⚠️ **Verification required.**\nCloudflare blocked the login.")
+        except EducakeLoginError as e:
+            await status_message.edit(content=f"❌ **Login failed.**\n`{str(e)[:200]}`")
         except Exception as e:
-            await status_msg.edit(content=f"❌ **Error:** `{str(e)[:100]}`")
+            print(f"[DeepHat] Login Error Traceback:\n{traceback.format_exc()}")
+            await status_message.edit(content=f"❌ **Unexpected error**\n`{str(e)[:200]}`")
 
 class MenuView(ui.View):
     def __init__(self):
         super().__init__(timeout=300)
 
     @ui.button(label="Login", emoji="🔐", style=discord.ButtonStyle.primary)
-    async def login_btn(self, interaction: discord.Interaction, button: ui.Button):
+    async def login_button(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(EducakeLoginModal())
 
     @ui.button(label="Homework", emoji="📚", style=discord.ButtonStyle.secondary)
-    async def homework_btn(self, interaction: discord.Interaction, button: ui.Button):
+    async def homework_button(self, interaction: discord.Interaction, button: ui.Button):
+        if not EDUC_AVAILABLE:
+            return await interaction.response.send_message("❌ Module error. Check logs.", ephemeral=True)
+        
         if interaction.user.id not in sessions:
-            return await interaction.response.send_message("Please login first.", ephemeral=True)
-        # Show homework selection logic here
-        await interaction.response.send_message("Fetching assignments...", ephemeral=True)
+            return await interaction.response.send_message("🔐 Please login first.", ephemeral=True)
+        
+        await interaction.response.defer(ephemeral=True)
+        # This would trigger your assignment selection logic
+        await interaction.followup.send("📚 Fetching your homework list...", ephemeral=True)
 
-# --- MAIN COMMANDS ---
+    @ui.button(label="Settings", emoji="⚙️", style=discord.ButtonStyle.secondary)
+    async def settings_button(self, interaction: discord.Interaction, button: ui.Button):
+        connected = interaction.user.id in sessions
+        text = "🟢 Connected" if connected else "🔴 Not connected"
+        await interaction.response.send_message(text, ephemeral=True)
 
-@bot.tree.command(name="menu", description="Open the VoboAi menu.")
+# --- BOT COMMANDS ---
+
+@bot.tree.command(name="menu", description="Open the VoboAi Educake menu.")
 async def menu(interaction: discord.Interaction):
     if not EDUC_AVAILABLE:
-        return await interaction.response.send_message("System error: Module not loaded.", ephemeral=True)
-    
+        await interaction.response.send_message("❌ **System Error:** Educake module not loaded. Check logs.", ephemeral=True)
+        return
+
     connected = interaction.user.id in sessions
-    await interaction.response.send_message(embed=menu_embed(connected), view=MenuView(), ephemeral=True)
+    try:
+        embed = menu_embed(connected)
+        await interaction.response.send_message(embed=embed, view=MenuView(), ephemeral=True)
+    except Exception as e:
+        print(f"[DeepHat] Menu Error: {e}")
+        await interaction.response.send_message("❌ Error loading menu.", ephemeral=True)
+
+@bot.event
+async def on_ready():
+    try:
+        await bot.tree.sync()
+        print(f"Logged in as {bot.user}")
+        print(f"{BOT_NAME} v{BOT_VERSION} system online.")
+    except Exception as e:
+        print(f"[DeepHat] Tree Sync Error: {e}")
 
 async def main():
+    # 1. Start Health Server
     await start_health_server()
+    
+    # 2. Start Discord Bot
     async with bot:
         await bot.start(DISCORD_TOKEN)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"[DeepHat] Fatal error in main loop: {e}")
+        print(traceback.format_exc())
