@@ -1,5 +1,5 @@
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from playwright_stealth import stealth_sync
+from playwright_stealth import stealth
 from dataclasses import dataclass
 from typing import Optional
 import re
@@ -89,7 +89,7 @@ def login(
     page = context.new_page()
     
     # Apply stealth to mask automation signals
-    stealth_sync(page)
+    stealth(page)
 
     try:
         page.goto(
@@ -99,7 +99,6 @@ def login(
         )
 
         if detect_cloudflare(page):
-            # Brief wait to see if stealth allows auto-resolution
             page.wait_for_timeout(3000)
             if detect_cloudflare(page):
                 raise CloudflareChallenge(
