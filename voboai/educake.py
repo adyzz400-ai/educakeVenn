@@ -1,5 +1,5 @@
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from playwright_stealth import stealth as stealth_func # FIXED IMPORT
+from playwright_stealth import stealth # Import the module
 from dataclasses import dataclass
 from typing import Optional
 import re
@@ -88,8 +88,16 @@ def login(
     context = browser.new_context(**context_args)
     page = context.new_page()
     
-    # Apply stealth to mask automation signals
-    stealth_func(page) # FIXED CALL
+    # CRITICAL FIX: Calling the function via the module name
+    # This resolves the 'module object is not callable' error
+    try:
+        stealth.stealth(page) 
+    except AttributeError:
+        # Fallback in case the library structure differs in your environment
+        try:
+            stealth(page)
+        except:
+            pass
 
     try:
         page.goto(
