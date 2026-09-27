@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: voboai-educake
+    runtime: python
+
+    buildCommand: >
+      pip install -r requirements.txt &&
+      PLAYWRIGHT_BROWSERS_PATH=0
+      python -m playwright install chromium
+
+    startCommand: python bot.py
+
+    healthCheckPath: /
+
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+
+      - key: GEMINI_API_KEY
+        sync: false
+
+      - key: SESSION_SECRET
+        sync: false
+
+      - key: MAX_CONCURRENT_JOBS
+        value: "2"
