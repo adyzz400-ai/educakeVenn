@@ -1,522 +1,726 @@
-The `ImportError` is occurring because the `playwright-stealth` library uses a slightly different naming convention for its synchronous function than what we implemented. In the Python version of the library, the function is typically just `stealth`.
+import asyncio
+import os
+import time
 
-To fix this permanently and stop the traceback, we need to correct the import and the function call in `voboai/educake.py`.
+import discord
+from discord import app_commands, ui
+from discord.ext import commands
+from aiohttp import web
 
-### The Fix
+from config import (
+    DISCORD_TOKEN,
+    BOT_NAME,
+    BOT_VERSION,
+)
 
-**1. Update the Import Statement**
-Change the import at the top of `voboai/educake.py` from:
-`from playwright_stealth import stealth_sync`
-to:
-`from playwright_stealth import stealth`
+from embeds import (
+    menu_embed,
+    homework_embed,
+    assignment_embed,
+    progress_embed,
+    completed_embed,
+)
 
-**2. Update the Function Call**
-Inside your `login` function, where you apply the stealth settings, change:
-`stealth_sync(page)`
-to:
-`stealth(page)`
+from voboai.educake import (
+    login,
+    save_storage_state,
+    fetch_assignments,
+    open_assignment,
+    extract_questions,
+    CloudflareChallenge,
+    EducakeLoginError,
+    EducakeError,
+)
 
----
+from voboai.solver import solve_question
 
-### Full Corrected `voboai/educake.py`
 
-```python
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from playwright_stealth import stealth
-from dataclasses import dataclass
-from typing import Optional
-import re
+sessions = {}
 
-@dataclass
-class EducakeAssignment:
-    title: str
-    subject: str = "Unknown"
-    teacher: str = "Unknown"
-    due: str = "No due date"
-    url: str = ""
+intents = discord.Intents.default()
 
-class EducakeError(Exception):
-    pass
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+)
 
-class CloudflareChallenge(EducakeError):
-    pass
 
-class EducakeLoginError(EducakeError):
-    pass
-
-def detect_cloudflare(page):
-    title = (page.title() or "").lower()
-    url = page.url.lower()
-    text = ""
-
-    try:
-        text = page.locator("body").inner_text(timeout=3000).lower()
-    except Exception:
-        pass
-
-    indicators = [
-        "just a moment",
-        "checking your browser",
-        "verify you are human",
-        "security check",
-        "cf-chl-",
-        "cloudflare",
-    ]
-
-    if any(x in title for x in indicators):
-        return True
-
-    if any(x in text for x in indicators):
-        return True
-
-    if "challenge-platform" in url:
-        return True
-
-    return False
-
-def create_browser():
-    pw = sync_playwright().start()
-
-    browser = pw.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-blink-features=AutomationControlled",
-            "--window-size=1920,1080",
-        ],
+async def health(request):
+    return web.Response(
+        text="VoboAi Educake is online."
     )
 
-    return pw, browser
 
-def login(
-    username: str,
-    password: str,
-    storage_state: Optional[dict] = None,
-):
-    pw, browser = create_browser()
+async def start_health_server():
+    app = web.Application()
 
-    context_args = {
-        "viewport": {
-            "width": 1280,
-            "height": 900,
-        },
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    }
+    app.router.add_get(
+        "/",
+        health,
+    )
 
-    if storage_state:
-        context_args["storage_state"] = storage_state
+    runner = web.AppRunner(app)
 
-    context = browser.new_context(**context_args)
-    page = context.new_page()
-    
-    # Apply stealth to mask automation signals
-    stealth(page)
+    await runner.setup()
 
-    try:
-        page.goto(
-            "https://my.educake.co.uk/",
-            wait_until="domcontentloaded",
-            timeout=45000,
+    port = int(
+        os.getenv("PORT", "10000")
+    )
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        port,
+    )
+
+    await site.start()
+
+
+class EducakeLoginModal(ui.Modal):
+
+    def __init__(self):
+        super().__init__(
+            title="Educake Login"
         )
 
-        if detect_cloudflare(page):
-            page.wait_for_timeout(3000)
-            if detect_cloudflare(page):
-                raise CloudflareChallenge(
-                    "Educake/Cloudflare presented a browser verification page."
+        self.username = ui.TextInput(
+            label="Educake Username",
+            placeholder="Enter your Educake username",
+            required=True,
+            max_length=100,
+        )
+
+        self.password = ui.TextInput(
+            label="Educake Password",
+            placeholder="Enter your password",
+            required=True,
+            style=discord.TextStyle.short,
+            max_length=200,
+        )
+
+        self.add_item(self.username)
+        self.add_item(self.password)
+
+    async def on_submit(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        await interaction.response.defer(
+            ephemeral=True
+        )
+
+        username = self.username.value
+        password = self.password.value
+
+        loop = asyncio.get_running_loop()
+
+        status_message = await interaction.followup.send(
+            "🔐 **Trying to log into your Educake account...**\n"
+            "Please wait while I securely connect to Educake.",
+            ephemeral=True,
+            wait=True,
+        )
+
+        try:
+
+            (
+                pw,
+                browser,
+                context,
+                page,
+            ) = await loop.run_in_executor(
+                None,
+                lambda: login(
+                    username,
+                    password,
+                ),
+            )
+
+            await status_message.edit(
+                content=(
+                    "✅ **Educake login successful!**\n"
+                    "📚 **Loading your assigned homework...**"
+                )
+            )
+
+            storage_state = await loop.run_in_executor(
+                None,
+                lambda: save_storage_state(
+                    context
+                ),
+            )
+
+            assignments = await loop.run_in_executor(
+                None,
+                lambda: fetch_assignments(
+                    page
+                ),
+            )
+
+            sessions[
+                interaction.user.id
+            ] = {
+                "username": username,
+                "password": password,
+                "storage_state": storage_state,
+                "assignments": assignments,
+            }
+
+            browser.close()
+            pw.stop()
+
+            await status_message.edit(
+                content=(
+                    "✅ **Educake account connected successfully!**\n"
+                    f"📚 **{len(assignments)} homework assignment(s) loaded.**"
+                )
+            )
+
+        except CloudflareChallenge:
+
+            await status_message.edit(
+                content=(
+                    "⚠️ **Educake browser verification appeared.**\n"
+                    "VoboAi stopped the login instead of bypassing "
+                    "the verification challenge."
+                )
+            )
+
+        except EducakeLoginError as e:
+
+            await status_message.edit(
+                content=(
+                    "❌ **Educake login failed.**\n"
+                    f"`{str(e)[:500]}`"
+                )
+            )
+
+        except Exception as e:
+
+            error_text = str(e)
+
+            if (
+                "Executable doesn't exist"
+                in error_text
+                or
+                "playwright install"
+                in error_text.lower()
+            ):
+
+                error_text = (
+                    "The Playwright browser is not installed "
+                    "on the Render service.\n\n"
+                    "Check your existing Render build command "
+                    "and redeploy with a clean build cache."
                 )
 
-        if is_logged_in(page):
-            return pw, browser, context, page
+            await status_message.edit(
+                content=(
+                    "❌ **Unexpected error**\n"
+                    f"`{error_text[:500]}`"
+                )
+            )
 
-        page.goto(
-            "https://my.educake.co.uk/login",
-            wait_until="domcontentloaded",
-            timeout=45000,
+
+class MenuView(ui.View):
+
+    def __init__(self):
+        super().__init__(
+            timeout=300
         )
 
-        if detect_cloudflare(page):
-            raise CloudflareChallenge(
-                "Educake/Cloudflare presented a browser verification page."
-            )
+    @ui.button(
+        label="Login",
+        emoji="🔐",
+        style=discord.ButtonStyle.primary,
+    )
+    async def login_button(
+        self,
+        interaction: discord.Interaction,
+        button: ui.Button,
+    ):
 
-        username_box = page.locator(
-            "input[name='username'], "
-            "input[name='email'], "
-            "input[type='text'], "
-            "input[type='email']"
-        ).first
-
-        password_box = page.locator(
-            "input[name='password'], "
-            "input[type='password']"
-        ).first
-
-        if not username_box.count():
-            raise EducakeLoginError(
-                "Could not find the Educake username/email field."
-            )
-
-        if not password_box.count():
-            raise EducakeLoginError(
-                "Could not find the Educake password field."
-            )
-
-        username_box.fill(username)
-        password_box.fill(password)
-
-        login_button = page.locator(
-            "button:has-text('Log in'), "
-            "button:has-text('Login'), "
-            "input[type='submit']"
-        ).first
-
-        if not login_button.count():
-            raise EducakeLoginError(
-                "Could not find the Educake login button."
-            )
-
-        login_button.click()
-
-        page.wait_for_load_state(
-            "domcontentloaded",
-            timeout=45000,
+        await interaction.response.send_modal(
+            EducakeLoginModal()
         )
 
-        page.wait_for_timeout(3000)
+    @ui.button(
+        label="Homework",
+        emoji="📚",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def homework_button(
+        self,
+        interaction: discord.Interaction,
+        button: ui.Button,
+    ):
 
-        if detect_cloudflare(page):
-            raise CloudflareChallenge(
-                "Educake/Cloudflare presented a browser verification page."
+        await show_homework(
+            interaction
+        )
+
+    @ui.button(
+        label="Settings",
+        emoji="⚙️",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def settings_button(
+        self,
+        interaction: discord.Interaction,
+        button: ui.Button,
+    ):
+
+        connected = (
+            interaction.user.id
+            in sessions
+        )
+
+        text = (
+            "🟢 Educake account connected."
+            if connected
+            else
+            "🔴 No Educake account connected."
+        )
+
+        await interaction.response.send_message(
+            text,
+            ephemeral=True,
+        )
+
+
+class HomeworkSelect(ui.Select):
+
+    def __init__(self, assignments):
+
+        self.assignments = assignments
+
+        options = []
+
+        for index, assignment in enumerate(
+            assignments[:25]
+        ):
+
+            options.append(
+                discord.SelectOption(
+                    label=assignment.title[:100],
+
+                    description=(
+                        f"{assignment.subject} • "
+                        f"Due: {assignment.due}"
+                    )[:100],
+
+                    value=str(index),
+
+                    emoji="📝",
+                )
             )
 
-        if not is_logged_in(page):
-            error_text = get_login_error(page)
+        super().__init__(
+            placeholder="Select your Educake homework...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
 
-            if error_text:
-                raise EducakeLoginError(error_text)
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ):
 
-            raise EducakeLoginError(
-                "Educake login did not complete."
+        index = int(
+            self.values[0]
+        )
+
+        assignment = self.assignments[index]
+
+        await interaction.response.edit_message(
+            embed=assignment_embed(
+                assignment
+            ),
+            view=StartAssignmentView(
+                assignment
+            ),
+        )
+
+
+class HomeworkSelectView(ui.View):
+
+    def __init__(self, assignments):
+
+        super().__init__(
+            timeout=300
+        )
+
+        self.add_item(
+            HomeworkSelect(
+                assignments
             )
+        )
 
-        return pw, browser, context, page
-
-    except Exception:
-        try:
-            browser.close()
-        except Exception:
-            pass
-
-        try:
-            pw.stop()
-        except Exception:
-            pass
-
-        raise
+        self.add_item(
+            BackButton()
+        )
 
 
-def is_logged_in(page):
-    url = page.url.lower()
+class StartAssignmentView(ui.View):
 
-    if "/login" not in url:
-        return True
+    def __init__(self, assignment):
 
-    indicators = [
-        "my educake",
-        "my account",
-        "view all your quizzes",
-        "track progress",
-        "log out",
-        "logout",
-    ]
+        super().__init__(
+            timeout=300
+        )
+
+        self.assignment = assignment
+
+    @ui.button(
+        label="Start",
+        emoji="▶️",
+        style=discord.ButtonStyle.success,
+    )
+    async def start(
+        self,
+        interaction: discord.Interaction,
+        button: ui.Button,
+    ):
+
+        await interaction.response.defer()
+
+        asyncio.create_task(
+            process_assignment(
+                interaction,
+                self.assignment,
+            )
+        )
+
+    @ui.button(
+        label="Back",
+        emoji="◀️",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def back(
+        self,
+        interaction: discord.Interaction,
+        button: ui.Button,
+    ):
+
+        await show_homework(
+            interaction
+        )
+
+
+class BackButton(
+    ui.Button
+):
+
+    def __init__(self):
+
+        super().__init__(
+            label="Back",
+            emoji="◀️",
+            style=discord.ButtonStyle.secondary,
+        )
+
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        await interaction.response.edit_message(
+            embed=menu_embed(
+                interaction.user.id in sessions
+            ),
+            view=MenuView(),
+        )
+
+
+async def show_homework(
+    interaction: discord.Interaction,
+):
+
+    session = sessions.get(
+        interaction.user.id
+    )
+
+    if not session:
+
+        await interaction.response.send_message(
+            "🔐 You need to connect your Educake account first.",
+            ephemeral=True,
+        )
+
+        return
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    loop = asyncio.get_running_loop()
 
     try:
-        text = page.locator("body").inner_text(timeout=5000).lower()
 
-        return any(
-            indicator in text
-            for indicator in indicators
+        (
+            pw,
+            browser,
+            context,
+            page,
+        ) = await loop.run_in_executor(
+            None,
+            lambda: login(
+                session["username"],
+                session["password"],
+                session["storage_state"],
+            ),
         )
 
-    except Exception:
-        return False
-
-
-def get_login_error(page):
-    selectors = [
-        ".error",
-        ".alert",
-        ".alert-danger",
-        "[role='alert']",
-    ]
-
-    for selector in selectors:
-        try:
-            locator = page.locator(selector).first
-
-            if locator.count():
-                text = locator.inner_text().strip()
-
-                if text:
-                    return text[:500]
-
-        except Exception:
-            pass
-
-    return None
-
-
-def save_storage_state(context):
-    return context.storage_state()
-
-
-def fetch_assignments(page):
-    if detect_cloudflare(page):
-        raise CloudflareChallenge(
-            "Cloudflare verification detected."
+        assignments = await loop.run_in_executor(
+            None,
+            lambda: fetch_assignments(
+                page
+            ),
         )
 
-    assignments = []
+        new_state = await loop.run_in_executor(
+            None,
+            lambda: save_storage_state(
+                context
+            ),
+        )
 
-    selectors = [
-        "a",
-        "button",
-        "[role='link']",
-    ]
+        session["storage_state"] = new_state
+        session["assignments"] = assignments
 
-    elements = []
+        browser.close()
+        pw.stop()
 
-    for selector in selectors:
-        try:
-            elements.extend(
-                page.locator(selector).all()
+        await interaction.followup.send(
+            embed=homework_embed(
+                assignments
+            ),
+            view=HomeworkSelectView(
+                assignments
+            ),
+            ephemeral=True,
+        )
+
+    except CloudflareChallenge:
+
+        await interaction.followup.send(
+            "⚠️ Educake presented a browser verification "
+            "challenge. The saved session cannot bypass it.",
+            ephemeral=True,
+        )
+
+    except Exception as e:
+
+        await interaction.followup.send(
+            f"❌ Could not load Educake homework:\n"
+            f"`{str(e)[:500]}`",
+            ephemeral=True,
+        )
+
+
+async def process_assignment(
+    interaction,
+    assignment,
+):
+
+    session = sessions.get(
+        interaction.user.id
+    )
+
+    if not session:
+
+        await interaction.followup.send(
+            "❌ Your Educake session has expired.",
+            ephemeral=True,
+        )
+
+        return
+
+    start_time = time.time()
+
+    loop = asyncio.get_running_loop()
+
+    try:
+
+        (
+            pw,
+            browser,
+            context,
+            page,
+        ) = await loop.run_in_executor(
+            None,
+            lambda: login(
+                session["username"],
+                session["password"],
+                session["storage_state"],
+            ),
+        )
+
+        await loop.run_in_executor(
+            None,
+            lambda: open_assignment(
+                page,
+                assignment,
+            ),
+        )
+
+        questions = await loop.run_in_executor(
+            None,
+            lambda: extract_questions(
+                page
+            ),
+        )
+
+        if not questions:
+
+            browser.close()
+            pw.stop()
+
+            await interaction.followup.send(
+                "⚠️ I opened the real Educake assignment, "
+                "but no readable questions were detected.",
+                ephemeral=True,
             )
-        except Exception:
-            pass
 
-    seen = set()
+            return
 
-    for element in elements:
-        try:
-            text = " ".join(
-                element.inner_text().split()
+        progress_message = await interaction.followup.send(
+            embed=progress_embed(
+                assignment,
+                0,
+                len(questions),
+                "00:00",
+            ),
+            ephemeral=True,
+            wait=True,
+        )
+
+        completed = 0
+
+        for question in questions:
+
+            await loop.run_in_executor(
+                None,
+                lambda q=question:
+                    solve_question(q),
             )
 
-            if not text:
-                continue
+            completed += 1
 
-            href = element.get_attribute("href") or ""
+            elapsed_seconds = int(
+                time.time() - start_time
+            )
 
-            combined = (
-                text + " " + href
-            ).lower()
+            minutes = elapsed_seconds // 60
+            seconds = elapsed_seconds % 60
 
-            keywords = [
-                "quiz",
-                "homework",
-                "assignment",
-            ]
-
-            if not any(
-                keyword in combined
-                for keyword in keywords
-            ):
-                continue
-
-            if len(text) < 3:
-                continue
-
-            if text in seen:
-                continue
-
-            seen.add(text)
-
-            parent_text = ""
+            elapsed = (
+                f"{minutes:02d}:{seconds:02d}"
+            )
 
             try:
-                parent_text = element.locator(
-                    "xpath=.."
-                ).inner_text(timeout=1000)
+
+                await progress_message.edit(
+                    embed=progress_embed(
+                        assignment,
+                        completed,
+                        len(questions),
+                        elapsed,
+                    )
+                )
+
             except Exception:
                 pass
 
-            subject = extract_subject(
-                parent_text
+        elapsed_seconds = int(
+            time.time() - start_time
+        )
+
+        minutes = elapsed_seconds // 60
+        seconds = elapsed_seconds % 60
+
+        elapsed = (
+            f"{minutes:02d}:{seconds:02d}"
+        )
+
+        await progress_message.edit(
+            embed=completed_embed(
+                assignment,
+                completed,
+                len(questions),
+                elapsed,
             )
+        )
 
-            teacher = extract_teacher(
-                parent_text
-            )
+        browser.close()
+        pw.stop()
 
-            due = extract_due_date(
-                parent_text
-            )
+    except CloudflareChallenge:
 
-            if href.startswith("/"):
-                href = (
-                    "https://my.educake.co.uk"
-                    + href
-                )
+        await interaction.followup.send(
+            "⚠️ Educake/Cloudflare presented a verification "
+            "challenge. VoboAi stopped instead of bypassing it.",
+            ephemeral=True,
+        )
 
-            assignments.append(
-                EducakeAssignment(
-                    title=text[:100],
-                    subject=subject,
-                    teacher=teacher,
-                    due=due,
-                    url=href,
-                )
-            )
+    except Exception as e:
 
-        except Exception:
-            continue
+        await interaction.followup.send(
+            f"❌ Assignment processing failed:\n"
+            f"`{str(e)[:500]}`",
+            ephemeral=True,
+        )
 
-    return deduplicate_assignments(
-        assignments
+
+@bot.tree.command(
+    name="menu",
+    description="Open the VoboAi Educake menu.",
+)
+async def menu(
+    interaction: discord.Interaction,
+):
+
+    connected = (
+        interaction.user.id
+        in sessions
+    )
+
+    await interaction.response.send_message(
+        embed=menu_embed(
+            connected
+        ),
+        view=MenuView(),
     )
 
 
-def extract_subject(text):
-    match = re.search(
-        r"subject\s*[:\-]\s*(.+)",
-        text,
-        re.I,
+@bot.event
+async def on_ready():
+
+    await bot.tree.sync()
+
+    print(
+        f"Logged in as {bot.user}"
     )
 
-    if match:
-        return match.group(1).split("\n")[0][:80]
-
-    return "Unknown"
-
-
-def extract_teacher(text):
-    match = re.search(
-        r"teacher\s*[:\-]\s*(.+)",
-        text,
-        re.I,
+    print(
+        f"{BOT_NAME} v{BOT_VERSION} "
+        "Educake system online."
     )
 
-    if match:
-        return match.group(1).split("\n")[0][:80]
 
-    return "Unknown"
+async def main():
 
+    await start_health_server()
 
-def extract_due_date(text):
-    match = re.search(
-        r"due\s*(?:date)?\s*[:\-]\s*(.+)",
-        text,
-        re.I,
+    await bot.start(
+        DISCORD_TOKEN
     )
 
-    if match:
-        return match.group(1).split("\n")[0][:80]
 
-    return "No due date"
+if __name__ == "__main__":
 
-
-def deduplicate_assignments(assignments):
-    result = []
-    seen = set()
-
-    for assignment in assignments:
-        key = (
-            assignment.title.lower(),
-            assignment.url,
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        result.append(assignment)
-
-    return result
-
-
-def open_assignment(page, assignment):
-    if detect_cloudflare(page):
-        raise CloudflareChallenge(
-            "Cloudflare verification detected."
-        )
-
-    if not assignment.url:
-        raise EducakeError(
-            "This assignment does not have a usable URL."
-        )
-
-    page.goto(
-        assignment.url,
-        wait_until="domcontentloaded",
-        timeout=30000,
+    asyncio.run(
+        main()
     )
-
-    page.wait_for_timeout(1500)
-
-    if detect_cloudflare(page):
-        raise CloudflareChallenge(
-            "Cloudflare verification appeared while opening the assignment."
-        )
-
-    return page
-
-
-def extract_questions(page):
-    if detect_cloudflare(page):
-        raise CloudflareChallenge(
-            "Cloudflare verification detected."
-        )
-
-    candidates = []
-
-    selectors = [
-        "[data-question]",
-        "fieldset",
-        "article",
-        ".question",
-        "[class*='question']",
-        "[id*='question']",
-    ]
-
-    for selector in selectors:
-        try:
-            loc = page.locator(selector)
-
-            count = min(
-                loc.count(),
-                100,
-            )
-
-            for i in range(count):
-                try:
-                    text = " ".join(
-                        loc.nth(i)
-                        .inner_text()
-                        .split()
-                    )
-
-                    if len(text) >= 10:
-                        candidates.append(text)
-
-                except Exception:
-                    pass
-
-        except Exception:
-            pass
-
-    output = []
-    seen = set()
-
-    for question in candidates:
-        if question in seen:
-            continue
-
-        seen.add(question)
-
-        output.append(question)
-
-    return output
-```
