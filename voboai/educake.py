@@ -1,5 +1,5 @@
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from playwright_stealth import stealth
+from playwright_stealth import stealth as stealth_func # FIXED IMPORT
 from dataclasses import dataclass
 from typing import Optional
 import re
@@ -89,7 +89,7 @@ def login(
     page = context.new_page()
     
     # Apply stealth to mask automation signals
-    stealth(page)
+    stealth_func(page) # FIXED CALL
 
     try:
         page.goto(
